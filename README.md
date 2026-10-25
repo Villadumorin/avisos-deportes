@@ -4,8 +4,9 @@ Notificacións push no móbil:
 
 - **1 hora antes** e **ao comezar** cada sesión de F1 (libres, clasificación, sprint, carreira), de MotoGP (libres, práctica, clasificación, sprint, carreira) e cada partido do Celta (Liga, Copa, Europa…).
 - **Os luns ás 09:00**, un resumo da semana: partidos do Celta (rival, competición, día e hora) e se hai GP de F1 ou MotoGP.
+- **Atrasos**: se unha sesión ou partido non comezou 10 minutos despois da hora prevista, chega "⚠️ Atrasada"; cando comeza de verdade, "🟢 Agora si". Se se aprazan, "❌ Aprazada".
 
-Funciona sen o ordenador aceso: execútase gratis en GitHub cada 3 horas e manda os avisos á app **ntfy**.
+Funciona sen o ordenador aceso: execútase gratis en GitHub cada 10 minutos e manda os avisos á app **ntfy**.
 
 Fontes: F1 → f1calendar.com · MotoGP → API oficial de motogp.com · Celta → ESPN.
 
@@ -19,7 +20,7 @@ Fontes: F1 → f1calendar.com · MotoGP → API oficial de motogp.com · Celta �
 ### 2. Repositorio en GitHub
 
 1. Crea unha conta en [github.com](https://github.com) se non tes.
-2. **New repository** → nome `avisos-deportes` → marca **Private** → *Create repository*.
+2. **New repository** → nome `avisos-deportes` → **Public** (así GitHub Actions é gratis sen límite; o tema de ntfy vai oculto como secret) → *Create repository*.
 3. *uploading an existing file* → arrastra `avisos.py` e `README.md` → *Commit changes*.
 4. *Add file → Create new file* → como nome escribe `.github/workflows/avisos.yml`, pega dentro o contido dese ficheiro → *Commit changes*.
 

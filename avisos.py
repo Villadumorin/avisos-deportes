@@ -4,6 +4,9 @@ Cada execución le os horarios, calcula os avisos das próximas horas e
 prográmaos en ntfy (que os entrega á hora exacta). Os avisos xa
 programados non se repiten.
 
+Ademais mira o estado en directo das sesións que xa deberían ter
+comezado: se van con atraso avisa, e volve avisar cando comezan de verdade.
+
 Uso:
   python avisos.py            # programa os avisos (precisa NTFY_TOPIC)
   python avisos.py --dry-run  # só amosa o que programaría
@@ -28,6 +31,8 @@ AVISO_ANTES = timedelta(hours=1)
 HORIZONTE = timedelta(hours=36)  # canto adiante se programa en cada execución
 TOLERANCIA = timedelta(minutes=15)  # avisos atrasados que aínda se mandan
 RESUMO_DIA, RESUMO_HORA = 0, 9  # luns ás 09:00
+MARXE_ATRASO = timedelta(minutes=10)  # sen comezar tras isto = atrasada
+VIXIAR_ATA = timedelta(hours=4)  # canto tempo se segue mirando unha sesión atrasada
 
 # Sesións que avisan. Quita as que non queiras.
 F1_SESIONS = {"FP1", "FP2", "FP3", "Sprint Qualifying", "Sprint", "Qualifying", "Grand Prix"}
@@ -37,6 +42,10 @@ CELTA_ESPN_ID = 85
 F1_ICS = "https://files-f1.motorsportcalendars.com/f1-calendar_p1_p2_p3_qualifying_sprint_gp.ics"
 MOTOGP_API = "https://api.pulselive.motogp.com/motogp/v1/events?seasonYear={}"
 CELTA_API = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams/{CELTA_ESPN_ID}/schedule?fixture=true"
+# Estado en directo
+F1_DIRECTO = "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard"
+MOTOGP_DIRECTO = "https://api.motogp.pulselive.com/motogp/v1/timing-gateway/livetiming-lite"
+PARTIDO_DIRECTO = "https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={}"
 
 DIAS = ["luns", "martes", "mércores", "xoves", "venres", "sábado", "domingo"]
 F1_NOMES = {
@@ -90,7 +99,7 @@ def eventos_motogp(agora):
             for b in gp.get("broadcasts", []):
                 if b.get("type") != "SESSION" or (b.get("category") or {}).get("acronym") != "MGP":
                     continue
-                codigo = b["shortname"]
+                codigo = sesion = b["shortname"]
                 if codigo in ("Q1", "Q2"):
                     # Q1 e Q2 van seguidas: un só aviso de clasificación
                     if q_visto:
@@ -105,6 +114,9 @@ def eventos_motogp(agora):
                     "detalle": nome,
                     "grupo": nome,
                     "hora_confirmada": True,
+                    "sesion": sesion,
+                    "gp_corto": gp.get("shortname"),
+                    "rematada": b.get("status") == "FINISHED",
                 })
     return eventos
 
@@ -123,8 +135,74 @@ def eventos_celta():
             "detalle": competicion,
             "grupo": None,
             "hora_confirmada": bool(comp.get("timeValid", True)),
+            "espn_id": ev["id"],
         })
     return eventos
+
+
+# --- Estado en directo ---------------------------------------------------
+
+def estado_sesion(ev, cache):
+    """'comezou', 'pendente', 'aprazada' ou None se non se sabe."""
+    if ev["deporte"] == "F1":
+        if "f1" not in cache:
+            cache["f1"] = json.loads(descargar(F1_DIRECTO)).get("events", [])
+        for gp in cache["f1"]:
+            for c in gp.get("competitions", []):
+                cando = datetime.fromisoformat(c["date"].replace("Z", "+00:00"))
+                if abs(cando - ev["cando"]) <= timedelta(minutes=20):
+                    return estado_espn(c["status"]["type"])
+        return None
+
+    if ev["deporte"] == "MotoGP":
+        if ev["rematada"]:
+            return "comezou"
+        if "motogp" not in cache:
+            cache["motogp"] = json.loads(descargar(MOTOGP_DIRECTO))
+        cab = cache["motogp"].get("head", {})
+        if cab.get("event_shortname") != ev["gp_corto"]:
+            return None
+        if cab.get("session_shortname") != ev["sesion"]:
+            return "pendente"  # en pista aínda está a sesión anterior
+        pilotos = (cache["motogp"].get("rider") or {}).values()
+        # "N" = aínda non empezou
+        en_marcha = cab.get("session_status_id") != "N" or any(p.get("num_lap", 0) > 0 for p in pilotos)
+        return "comezou" if en_marcha else "pendente"
+
+    datos = json.loads(descargar(PARTIDO_DIRECTO.format(ev["espn_id"])))
+    return estado_espn(datos["header"]["competitions"][0]["status"]["type"])
+
+
+def estado_espn(tipo):
+    if tipo.get("name") in ("STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_SUSPENDED"):
+        return "aprazada"
+    return "pendente" if tipo.get("state") == "pre" else "comezou"
+
+
+def avisos_atrasos(eventos, agora, xa):
+    """Avisos de sesións que deberían ter comezado e non o fixeron."""
+    cache, avisos = {}, []
+    for ev in eventos:
+        if not ev["hora_confirmada"] or not (ev["cando"] + MARXE_ATRASO <= agora <= ev["cando"] + VIXIAR_ATA):
+            continue
+        try:
+            estado = estado_sesion(ev, cache)
+        except Exception as e:
+            print(f"Non se puido ler o estado de {ev['titulo']}: {e}", file=sys.stderr)
+            continue
+        titulo = ev["titulo"].replace("⚽ ", "")
+        base = f"{ev['detalle']} · prevista ás {hora_local(ev['cando'])}"
+        atrasada = {"cando": agora, "titulo": f"⚠️ Atrasada: {titulo}",
+                    "mensaxe": f"{base}, aínda non comezou", "tags": ["hourglass"], "prioridade": 4}
+        if estado == "pendente":
+            avisos.append(atrasada)
+        elif estado == "aprazada":
+            avisos.append({"cando": agora, "titulo": f"❌ Aprazada: {titulo}",
+                           "mensaxe": base, "tags": ["x"], "prioridade": 4})
+        elif estado == "comezou" and (atrasada["titulo"], atrasada["mensaxe"]) in xa:
+            avisos.append({"cando": agora, "titulo": f"🟢 Agora si: comeza {titulo}",
+                           "mensaxe": base, "tags": [ETIQUETAS[ev["deporte"]]], "prioridade": 4})
+    return avisos
 
 
 # --- Avisos --------------------------------------------------------------
@@ -266,11 +344,15 @@ def main():
         print(r["titulo"]); print(r["mensaxe"])
         return
 
-    avisos = calcular_avisos(eventos, agora)
     xa = set() if dry_run else ntfy_xa_programados()
+    titulos_xa = {t for t, _ in xa}
+    avisos = calcular_avisos(eventos, agora) + avisos_atrasos(eventos, agora, xa)
     novos = 0
     for a in avisos:
         if (a["titulo"], a["mensaxe"]) in xa:
+            continue
+        # O resumo semanal vai unha vez aínda que cambie algún horario
+        if "calendar" in a["tags"] and a["titulo"] in titulos_xa:
             continue
         cando = a["cando"].astimezone(TZ).strftime("%a %d/%m %H:%M")
         print(f"{cando}  {a['titulo']}  |  {a['mensaxe'].splitlines()[0]}")
