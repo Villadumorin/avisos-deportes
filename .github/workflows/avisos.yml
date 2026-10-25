@@ -2,9 +2,9 @@ name: Avisos deportes
 
 on:
   schedule:
-    # Cada 3 horas. Os avisos prográmanse en ntfy con antelación,
-    # así que os atrasos de GitHub non afectan á hora do aviso.
-    - cron: "23 */3 * * *"
+    # Cada 10 minutos: programa os avisos en ntfy con antelación e
+    # mira se algunha sesión vai con atraso.
+    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
       modo:
@@ -16,6 +16,7 @@ on:
 jobs:
   avisos:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,7 +24,7 @@ jobs:
           python-version: "3.12"
       - name: Programar avisos
         env:
-          NTFY_TOPIC: celta-motor-k8v3m2qz
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
           if [ "${{ inputs.modo }}" = "proba" ]; then
             python avisos.py --proba
