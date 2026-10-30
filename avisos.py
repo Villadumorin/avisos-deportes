@@ -13,6 +13,7 @@ Uso:
   python avisos.py --proba    # manda unha notificación de proba agora
 """
 
+import html
 import json
 import os
 import re
@@ -42,6 +43,14 @@ CELTA_ESPN_ID = 85
 F1_ICS = "https://files-f1.motorsportcalendars.com/f1-calendar_p1_p2_p3_qualifying_sprint_gp.ics"
 MOTOGP_API = "https://api.pulselive.motogp.com/motogp/v1/events?seasonYear={}"
 CELTA_API = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/teams/{CELTA_ESPN_ID}/schedule?fixture=true"
+
+# Balonmán: cadete masculino do Club Balonmán Tui. Só sae no resumo do luns.
+# Os ids cambian cada tempada: buscalos en resultadosbalonmano.isquad.es (Federación Galega).
+BALONMAN_WEB = "https://resultadosbalonmano.isquad.es/"
+BALONMAN_CATEGORIA = 3144  # Cadete masculino, tempada 2026/27
+BALONMAN_EQUIPO = 219540  # Martínez & De Castro Balonmán Tui
+BALONMAN_NOME = "Cadete Tui"
+
 # Estado en directo
 F1_DIRECTO = "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard"
 MOTOGP_DIRECTO = "https://api.motogp.pulselive.com/motogp/v1/timing-gateway/livetiming-lite"
@@ -140,6 +149,46 @@ def eventos_celta():
     return eventos
 
 
+def eventos_balonman():
+    """A federación non ten API: le cada grupo da categoría e colle os partidos do equipo."""
+    base = f"{BALONMAN_WEB}competicion.php?seleccion=0&id_territorial=20&id_categoria={BALONMAN_CATEGORIA}"
+    competicions = json.loads(re.search(r"EMBED_COMPETICIONES = (\[.*?\]);", descargar(base)).group(1))
+    eventos, vistos = [], set()
+    for comp in competicions:
+        if "AMIGABLES" in comp["nombre"]:
+            continue
+        for grupo in re.findall(r"<option value='(\d{7,})'", descargar(f"{base}&id_competicion={comp['id']}")):
+            paxina = descargar(f"{BALONMAN_WEB}equipo.php?seleccion=0&id_superficie=1"
+                               f"&id_equipo={BALONMAN_EQUIPO}&id={grupo}")
+            for fila in re.split(r'<tr\s+class="partido"', paxina)[1:]:
+                fila = fila.split("</tr>")[0]
+                partido = re.search(r'data-id="(\d+)"', fila).group(1)
+                pendente = re.search(r'data-estado="Pend', fila)
+                data = re.search(r"<div class='negrita'>\s*(\d+/\d+/\d+)\s*</div>\s*<div>\s*(\d+:\d+)?", fila)
+                equipos = re.findall(r"id_equipo=(\d+)[^>]*>\s*([^<]+?)\s*</a>", fila.split("nombres-equipos")[-1])
+                if partido in vistos or not (data or pendente) or len(equipos) < 2 \
+                        or str(BALONMAN_EQUIPO) not in dict(equipos):
+                    continue
+                vistos.add(partido)
+                (id_casa, casa), (_, fora) = equipos[:2]
+                na_casa = id_casa == str(BALONMAN_EQUIPO)
+                rival = f"{html.unescape(fora if na_casa else casa)} ({'casa' if na_casa else 'fóra'})"
+                celda = re.search(r"col-lugar.*?</td>", fila, re.S)
+                lugar = re.search(r"<span>\s*(.*?)\s*</span>", celda.group(0), re.S) if celda else None
+                eventos.append({
+                    "deporte": "Balonmán",
+                    # Sen data aínda = None: só serve para dicir cal é o próximo rival
+                    "cando": datetime.strptime(f"{data.group(1)} {data.group(2) or '00:00'}",
+                                               "%d/%m/%Y %H:%M").replace(tzinfo=TZ) if data else None,
+                    "titulo": f"🤾 {BALONMAN_NOME} - {rival}",
+                    "detalle": html.unescape(lugar.group(1)).title() if lugar else "",
+                    "grupo": None,
+                    "hora_confirmada": bool(data and data.group(2)),
+                    "rival": rival,
+                })
+    return eventos
+
+
 # --- Estado en directo ---------------------------------------------------
 
 def estado_sesion(ev, cache):
@@ -183,7 +232,7 @@ def avisos_atrasos(eventos, agora, xa):
     """Avisos de sesións que deberían ter comezado e non o fixeron."""
     cache, avisos = {}, []
     for ev in eventos:
-        if not ev["hora_confirmada"] or not (ev["cando"] + MARXE_ATRASO <= agora <= ev["cando"] + VIXIAR_ATA):
+        if not ev["hora_confirmada"] or ev["deporte"] not in ETIQUETAS or not (ev["cando"] + MARXE_ATRASO <= agora <= ev["cando"] + VIXIAR_ATA):
             continue
         try:
             estado = estado_sesion(ev, cache)
@@ -220,7 +269,7 @@ ETIQUETAS = {"F1": "racing_car", "MotoGP": "motorcycle", "Celta": "soccer"}
 
 
 def avisos_de_sesion(ev):
-    if not ev["hora_confirmada"]:
+    if not ev["hora_confirmada"] or ev["deporte"] not in ETIQUETAS:  # o balonmán só vai no resumo
         return []
     titulo = ev["titulo"].replace("⚽ ", "")
     base = f"{ev['detalle']} · {dia_local(ev['cando'])} ás {hora_local(ev['cando'])}"
@@ -233,10 +282,21 @@ def avisos_de_sesion(ev):
     ]
 
 
+def linas_balonman(eventos, semana, hora):
+    partidos = [e for e in semana if e["deporte"] == "Balonmán"]
+    if partidos:
+        return [f"🤾 {e['titulo'][2:]} · {dia_local(e['cando'])}, {hora(e)}"
+                + (f" · {e['detalle']}" if e["detalle"] else "") for e in partidos]
+    sen_data = [e for e in eventos if e["deporte"] == "Balonmán" and e["cando"] is None]
+    if sen_data:
+        return [f"🤾 {BALONMAN_NOME}: próximo partido sen data aínda, contra {sen_data[0]['rival']}"]
+    return [f"🤾 Sen partido do {BALONMAN_NOME}"]
+
+
 def resumo_semanal(eventos, luns):
     """Aviso do luns co que hai na semana que empeza ese día (hora local)."""
     fin = luns + timedelta(days=7)
-    semana = sorted((e for e in eventos if luns <= e["cando"] < fin), key=lambda e: e["cando"])
+    semana = sorted((e for e in eventos if e["cando"] and luns <= e["cando"] < fin), key=lambda e: e["cando"])
 
     def hora(e):
         return hora_local(e["cando"]) if e["hora_confirmada"] else "hora por confirmar"
@@ -248,6 +308,8 @@ def resumo_semanal(eventos, luns):
             linas.append(f"⚽ {e['titulo'][2:]} ({e['detalle']}) · {dia_local(e['cando'])}, {hora(e)}")
     else:
         linas.append("⚽ Sen partido do Celta")
+    if any(e["deporte"] == "Balonmán" for e in eventos):
+        linas += linas_balonman(eventos, semana, hora)
 
     for deporte, emoji in (("F1", "🏎️"), ("MotoGP", "🏍️")):
         sesions = [e for e in semana if e["deporte"] == deporte]
@@ -268,6 +330,17 @@ def resumo_semanal(eventos, luns):
         "tags": ["calendar"],
         "prioridade": 3,
     }
+
+
+def resumo_pendente(agora, titulos_xa):
+    """Toca programar nesta execución algún resumo do luns?"""
+    hoxe = agora.astimezone(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    for dias in range(0, HORIZONTE.days + 2):
+        dia = hoxe + timedelta(days=dias)
+        if (dia.weekday() == RESUMO_DIA and agora - TOLERANCIA <= dia.replace(hour=RESUMO_HORA) < agora + HORIZONTE
+                and f"A semana do {dia.day}/{dia.month}" not in titulos_xa):
+            return True
+    return False
 
 
 def calcular_avisos(eventos, agora):
@@ -329,8 +402,15 @@ def main():
         print("Proba enviada")
         return
 
+    xa = set() if dry_run else ntfy_xa_programados()
+    titulos_xa = {t for t, _ in xa}
+    fontes = [("F1", eventos_f1), ("MotoGP", lambda: eventos_motogp(agora)), ("Celta", eventos_celta)]
+    # O balonmán son unhas 30 descargas: só se le cando toca programar o resumo do luns
+    if "--semana" in args or resumo_pendente(agora, titulos_xa):
+        fontes.append(("Balonmán", eventos_balonman))
+
     eventos, erros = [], []
-    for nome, fonte in (("F1", eventos_f1), ("MotoGP", lambda: eventos_motogp(agora)), ("Celta", eventos_celta)):
+    for nome, fonte in fontes:
         try:
             eventos += fonte()
         except Exception as e:  # unha fonte caída non debe parar as outras
@@ -344,8 +424,6 @@ def main():
         print(r["titulo"]); print(r["mensaxe"])
         return
 
-    xa = set() if dry_run else ntfy_xa_programados()
-    titulos_xa = {t for t, _ in xa}
     avisos = calcular_avisos(eventos, agora) + avisos_atrasos(eventos, agora, xa)
     novos = 0
     for a in avisos:
